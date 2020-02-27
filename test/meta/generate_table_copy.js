@@ -25,8 +25,12 @@ function emit_a() {
 // the table entry number specified as a parameter.  That will either return a
 // value 0 to 9 indicating the function called, or will throw an exception if
 // the table entry is empty.
+//
+// Here `table` is the single table we operate on, though there are multiple
+// tables in the module.  Thus we test that the correct table is targeted.
+// The other table should remain empty.
 
-function emit_b(insn) {
+function emit_b(insn, table) {
     print(
 `
 (module
@@ -36,12 +40,13 @@ function emit_b(insn) {
   (import "a" "ef2" (func (result i32)))
   (import "a" "ef3" (func (result i32)))
   (import "a" "ef4" (func (result i32)))    ;; index 4
-  (table 30 30 funcref)
-  (elem (i32.const 2) 3 1 4 1)
-  (elem funcref
+  (table $t0 30 30 funcref)
+  (table $t1 30 30 funcref)
+  (elem (table $t${table}) (i32.const 2) 3 1 4 1)
+  (elem (table $t${table}) funcref
     (ref.func 2) (ref.func 7) (ref.func 1) (ref.func 8))
-  (elem (i32.const 12) 7 5 2 3 6)
-  (elem funcref
+  (elem (table $t${table}) (i32.const 12) 7 5 2 3 6)
+  (elem (table $t${table}) funcref
     (ref.func 5) (ref.func 9) (ref.func 2) (ref.func 7) (ref.func 6))
   (func (result i32) (i32.const 5))  ;; index 5
   (func (result i32) (i32.const 6))
@@ -51,7 +56,9 @@ function emit_b(insn) {
   (func (export "test")
     ${insn})
   (func (export "check") (param i32) (result i32)
-    (call_indirect (type 0) (local.get 0)))
+    (call_indirect (table $t${table}) (type 0) (local.get 0)))
+  (func (export "check_other") (param i32) (result i32)
+    (call_indirect (table $t${(table + 1) % 2}) (type 0) (local.get 0)))
 )
 `);
 }
@@ -61,8 +68,8 @@ function emit_b(insn) {
 // indirect calls, one for each element of |expected_result_vector|.  The
 // results are compared to those in the vector.
 
-function tab_test(instruction, expected_result_vector) {
-    emit_b(instruction);
+function tab_test(opcode, args, table, expected_result_vector) {
+    emit_b(`(${opcode} $t${table} $t${table} ${args})`, table);
     print(`(invoke "test")`);
     for (let i = 0; i < expected_result_vector.length; i++) {
         let expected = expected_result_vector[i];
@@ -72,6 +79,9 @@ function tab_test(instruction, expected_result_vector) {
             print(`(assert_return (invoke "check" (i32.const ${i})) (i32.const ${expected}))`);
         }
     }
+    for (let i = 0; i < expected_result_vector.length; i++) {
+        print(`(assert_trap (invoke "check_other" (i32.const ${i})) "uninitialized element")`);
+    }
 }
 
 emit_a();
@@ -80,38 +90,40 @@ emit_a();
 // to count through the vector entries when debugging.
 let e = undefined;
 
-// This just gives the initial state of the table, with its active
-// initialisers applied
-tab_test("(nop)",
-         [e,e,3,1,4, 1,e,e,e,e, e,e,7,5,2, 3,6,e,e,e, e,e,e,e,e, e,e,e,e,e]);
+for ( let table of [0,1] ) {
+    // This just gives the initial state of the table, with its active
+    // initialisers applied
+    tab_test("nop", "", table,
+             [e,e,3,1,4, 1,e,e,e,e, e,e,7,5,2, 3,6,e,e,e, e,e,e,e,e, e,e,e,e,e]);
 
-// Copy non-null over non-null
-tab_test("(table.copy (i32.const 13) (i32.const 2) (i32.const 3))",
-         [e,e,3,1,4, 1,e,e,e,e, e,e,7,3,1, 4,6,e,e,e, e,e,e,e,e, e,e,e,e,e]);
+    // Copy non-null over non-null
+    tab_test("table.copy", "(i32.const 13) (i32.const 2) (i32.const 3)", table,
+             [e,e,3,1,4, 1,e,e,e,e, e,e,7,3,1, 4,6,e,e,e, e,e,e,e,e, e,e,e,e,e]);
 
-// Copy non-null over null
-tab_test("(table.copy (i32.const 25) (i32.const 15) (i32.const 2))",
-         [e,e,3,1,4, 1,e,e,e,e, e,e,7,5,2, 3,6,e,e,e, e,e,e,e,e, 3,6,e,e,e]);
+    // Copy non-null over null
+    tab_test("table.copy", "(i32.const 25) (i32.const 15) (i32.const 2)", table,
+             [e,e,3,1,4, 1,e,e,e,e, e,e,7,5,2, 3,6,e,e,e, e,e,e,e,e, 3,6,e,e,e]);
 
-// Copy null over non-null
-tab_test("(table.copy (i32.const 13) (i32.const 25) (i32.const 3))",
-         [e,e,3,1,4, 1,e,e,e,e, e,e,7,e,e, e,6,e,e,e, e,e,e,e,e, e,e,e,e,e]);
+    // Copy null over non-null
+    tab_test("table.copy", "(i32.const 13) (i32.const 25) (i32.const 3)", table,
+             [e,e,3,1,4, 1,e,e,e,e, e,e,7,e,e, e,6,e,e,e, e,e,e,e,e, e,e,e,e,e]);
 
-// Copy null over null
-tab_test("(table.copy (i32.const 20) (i32.const 22) (i32.const 4))",
-         [e,e,3,1,4, 1,e,e,e,e, e,e,7,5,2, 3,6,e,e,e, e,e,e,e,e, e,e,e,e,e]);
+    // Copy null over null
+    tab_test("table.copy", "(i32.const 20) (i32.const 22) (i32.const 4)", table,
+             [e,e,3,1,4, 1,e,e,e,e, e,e,7,5,2, 3,6,e,e,e, e,e,e,e,e, e,e,e,e,e]);
 
-// Copy null and non-null entries, non overlapping
-tab_test("(table.copy (i32.const 25) (i32.const 1) (i32.const 3))",
-         [e,e,3,1,4, 1,e,e,e,e, e,e,7,5,2, 3,6,e,e,e, e,e,e,e,e, e,3,1,e,e]);
+    // Copy null and non-null entries, non overlapping
+    tab_test("table.copy", "(i32.const 25) (i32.const 1) (i32.const 3)", table,
+             [e,e,3,1,4, 1,e,e,e,e, e,e,7,5,2, 3,6,e,e,e, e,e,e,e,e, e,3,1,e,e]);
 
-// Copy null and non-null entries, overlapping, backwards
-tab_test("(table.copy (i32.const 10) (i32.const 12) (i32.const 7))",
-         [e,e,3,1,4, 1,e,e,e,e, 7,5,2,3,6, e,e,e,e,e, e,e,e,e,e, e,e,e,e,e]);
+    // Copy null and non-null entries, overlapping, backwards
+    tab_test("table.copy", "(i32.const 10) (i32.const 12) (i32.const 7)", table,
+             [e,e,3,1,4, 1,e,e,e,e, 7,5,2,3,6, e,e,e,e,e, e,e,e,e,e, e,e,e,e,e]);
 
-// Copy null and non-null entries, overlapping, forwards
-tab_test("(table.copy (i32.const 12) (i32.const 10) (i32.const 7))",
-         [e,e,3,1,4, 1,e,e,e,e, e,e,e,e,7, 5,2,3,6,e, e,e,e,e,e, e,e,e,e,e]);
+    // Copy null and non-null entries, overlapping, forwards
+    tab_test("table.copy", "(i32.const 12) (i32.const 10) (i32.const 7)", table,
+             [e,e,3,1,4, 1,e,e,e,e, e,e,e,e,7, 5,2,3,6,e, e,e,e,e,e, e,e,e,e,e]);
+}
 
 // Out-of-bounds checks.
 
